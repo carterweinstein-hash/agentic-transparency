@@ -1,0 +1,52 @@
+name: Mirror anchors
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Copy and verify new anchors
+        env:
+          AGENTIC_URL: ${{ vars.AGENTIC_URL || 'https://useagentic.app' }}
+        run: node mirror.mjs
+      - name: Verify the whole chain
+        run: node verify.mjs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Timestamp new anchors with OpenTimestamps
+        run: |
+          pip install --quiet opentimestamps-client
+          for f in anchors/*.json; do
+            [ -e "$f" ] || continue
+            [ -e "$f.ots" ] || ots stamp "$f" || echo "stamp failed for $f, will retry next run"
+          done
+          # Pending proofs become complete once the calendars commit to a Bitcoin block, usually within a few hours.
+          for p in anchors/*.ots; do
+            [ -e "$p" ] || continue
+            ots upgrade "$p" >/dev/null 2>&1 || true
+          done
+      - name: Commit
+        run: |
+          git config user.name "agentic-transparency-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A anchors jwks.json keys-history.json 2>/dev/null || true
+          if git diff --cached --quiet; then echo "No changes"; exit 0; fi
+          git commit -q -m "Mirror anchors and published keys"
+          git push
